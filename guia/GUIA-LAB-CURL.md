@@ -1149,7 +1149,7 @@ Resuélvalos usando solo lo aprendido. Cada uno requiere combinar varios pasos.
 | `404` en una interfaz | Nombre mal escrito | Liste primero `/interfaces` y copie el nombre |
 | `422` al hacer `PUT` | Envió campos parciales | Use `PATCH`, o envíe la representación completa |
 | Todo da `000` o "Connection refused" | El laboratorio no está corriendo | Arranque `python3 app/netlab.py` o `docker compose up` |
-| "Connection reset" solo en el navegador, con el lab corriendo en Docker | Algunos entornos Docker (p. ej. OrbStack en macOS) resetean las conexiones IPv6 y `localhost` cae ahí primero | Use `http://127.0.0.1:8080` en lugar de `http://localhost:8080` |
+| "Connection reset" en el navegador con el lab corriendo en Docker | Copia antigua del laboratorio que solo escuchaba IPv4, con un Docker que reenvía `localhost` por IPv6 | Actualice: `docker pull ghcr.io/cth-soluciones/netlab` (o use `http://127.0.0.1:8080` mientras tanto) |
 
 ## Si necesita empezar de cero
 

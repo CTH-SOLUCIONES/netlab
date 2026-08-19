@@ -12,6 +12,7 @@ Sin dependencias externas: solo libreria estandar de Python 3.
 import json
 import os
 import re
+import socket
 import threading
 import time
 import copy
@@ -1311,6 +1312,11 @@ class Handler(BaseHTTPRequestHandler):
         self._status = 500
         self._ip = (self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
                     or self.client_address[0])
+        # En pila dual, los clientes IPv4 llegan como ::ffff:A.B.C.D; se
+        # normaliza para que el registro proyectado y el limite de peticiones
+        # usen la direccion que la clase reconoce.
+        if self._ip.startswith("::ffff:"):
+            self._ip = self._ip[7:]
         self._team = re.sub(r"[^A-Za-z0-9_-]", "", self.headers.get("X-Lab-Team", "") or "")[:24] or "shared"
         self._req_id = hashlib.md5(f"{time.time()}{self.path}{self._ip}".encode()).hexdigest()[:12]
         parsed = urlparse(self.path)
@@ -1530,12 +1536,34 @@ class Handler(BaseHTTPRequestHandler):
     do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = lambda self: self._dispatch()
 
 
+# Servidor de pila dual: acepta IPv4 e IPv6 en el mismo puerto. Algunos
+# entornos Docker con IPv6 habilitado (por ejemplo OrbStack) reenvian
+# localhost hacia la direccion IPv6 del contenedor; si el proceso escuchara
+# solo en 0.0.0.0 esas conexiones se rechazarian y el navegador mostraria
+# "connection reset".
+class DualStackHTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        try:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except (AttributeError, OSError):
+            pass
+        super().server_bind()
+
+
 def main():
     get_world("shared")
     threading.Thread(target=simulator, daemon=True).start()
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    try:
+        srv = DualStackHTTPServer(("::", PORT), Handler)
+        pila = "IPv4 e IPv6"
+    except OSError:
+        # Equipos sin IPv6: se escucha solo en IPv4, como antes.
+        srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+        pila = "IPv4"
     srv.daemon_threads = True
-    print(f"NetLab API escuchando en el puerto {PORT}", flush=True)
+    print(f"NetLab API escuchando en el puerto {PORT} ({pila})", flush=True)
     print(f"Interfaz de usuario servida desde {UI_FILE}", flush=True)
     srv.serve_forever()
 

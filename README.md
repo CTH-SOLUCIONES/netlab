@@ -48,10 +48,10 @@ Si ya clonó el repositorio, `docker compose up` hace lo mismo construyendo la
 imagen localmente. Vea [Construir la imagen](#construir-la-imagen) para los
 detalles del build.
 
-> Si el navegador dice "connection reset" con el contenedor corriendo, abra
-> `http://127.0.0.1:8080` en lugar de `localhost`: algunos entornos Docker
-> (como OrbStack en macOS) resetean las conexiones IPv6 y `localhost` cae ahí
-> primero.
+> La API escucha en IPv4 e IPv6 (pila dual), así que `localhost` funciona
+> también en los entornos Docker que reenvían los puertos por IPv6, como
+> OrbStack. Si ve "connection reset" en el navegador, está corriendo una
+> imagen antigua: haga `docker pull ghcr.io/cth-soluciones/netlab`.
 
 ### Opción 3: expuesto a internet (para academias)
 
