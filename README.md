@@ -48,6 +48,11 @@ Si ya clonó el repositorio, `docker compose up` hace lo mismo construyendo la
 imagen localmente. Vea [Construir la imagen](#construir-la-imagen) para los
 detalles del build.
 
+> Si el navegador dice "connection reset" con el contenedor corriendo, abra
+> `http://127.0.0.1:8080` en lugar de `localhost`: algunos entornos Docker
+> (como OrbStack en macOS) resetean las conexiones IPv6 y `localhost` cae ahí
+> primero.
+
 ### Opción 3: expuesto a internet (para academias)
 
 Si quiere que todo el curso trabaje contra una sola instancia publicada en una
