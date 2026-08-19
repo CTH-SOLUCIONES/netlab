@@ -10,13 +10,19 @@ LABEL org.opencontainers.image.source="https://github.com/CTH-SOLUCIONES/netlab"
 WORKDIR /app
 COPY app/netlab.py app/ui.html ./
 
+# El estado del laboratorio se persiste en SQLite dentro de /data; montar un
+# volumen ahi hace que sobreviva a recrear el contenedor.
+RUN mkdir /data && chown 10001:10001 /data
+VOLUME /data
+
 ENV PORT=8080 \
+    NETLAB_DB=/data/netlab.db \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8080
 
-# Usuario sin privilegios: el proceso no necesita escribir en disco.
+# Usuario sin privilegios: solo escribe la base de datos en /data.
 USER 10001:10001
 
 # La imagen slim no trae curl; la verificacion de salud se hace con Python.

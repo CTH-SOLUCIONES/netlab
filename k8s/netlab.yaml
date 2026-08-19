@@ -53,6 +53,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
+        # Hace que el volumen de datos sea escribible por el usuario 10001.
+        fsGroup: 10001
       containers:
         - name: api
           # Imagen publica multiarquitectura (amd64 y arm64). No se requiere
@@ -68,6 +70,11 @@ spec:
               value: /app/ui.html
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
+            # Instantaneas del estado en SQLite. Con emptyDir sobreviven a un
+            # reinicio del contenedor pero no a recrear el pod; si quiere que
+            # sobrevivan tambien a eso, cambie el volumen "datos" por un PVC.
+            - name: NETLAB_DB
+              value: /data/netlab.db
             # Si expone el laboratorio a internet, defina claves propias:
             # - name: NETLAB_ADMIN_KEY
             #   valueFrom: { secretKeyRef: { name: netlab-claves, key: admin } }
@@ -80,6 +87,8 @@ spec:
             - name: codigo
               mountPath: /app
               readOnly: true
+            - name: datos
+              mountPath: /data
           resources:
             requests:
               cpu: 50m
@@ -108,6 +117,8 @@ spec:
         - name: codigo
           configMap:
             name: netlab-codigo
+        - name: datos
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

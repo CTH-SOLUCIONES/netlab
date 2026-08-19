@@ -31,9 +31,13 @@ Linux / macOS:
 python3 app/netlab.py
 ```
 
-Abra <http://localhost:8080/> — ahí están la interfaz visual y la API
-(`http://localhost:8080/api/v1`). Para usar otro puerto, defina la variable de
-entorno `PORT` antes de arrancar.
+Al arrancar imprime la URL lista para abrir: la interfaz visual queda en
+<http://localhost:8080/> y la API en `http://localhost:8080/api/v1`. Para usar
+otro puerto, defina la variable de entorno `PORT` antes de arrancar.
+
+El estado se guarda en un archivo `netlab.db` (SQLite) en el directorio actual,
+así que cerrar y volver a abrir el laboratorio no pierde el trabajo. Para una
+sesión efímera arranque con `NETLAB_DB=off`.
 
 ### Opción 2: Docker
 
@@ -41,8 +45,12 @@ La imagen pública (amd64 y arm64) está en GitHub Container Registry; no hay qu
 clonar nada:
 
 ```bash
-docker run -p 8080:8080 ghcr.io/cth-soluciones/netlab
+docker run -p 8080:8080 -v netlab-datos:/data ghcr.io/cth-soluciones/netlab
 ```
+
+El volumen `netlab-datos` guarda el estado (SQLite): recrear el contenedor no
+pierde el trabajo de la clase. Para empezar de cero, borre el volumen
+(`docker volume rm netlab-datos`) o use el botón de reinicio de la interfaz.
 
 Si ya clonó el repositorio, `docker compose up` hace lo mismo construyendo la
 imagen localmente. Vea [Construir la imagen](#construir-la-imagen) para los
@@ -161,10 +169,17 @@ voluntad.
   que construir, el laboratorio es inmune a fallos de red o de registro de
   contenedores el día de la clase, al precio de renunciar a un framework y su
   documentación automática. Para un aula, esa robustez vale más.
-- **Estado en memoria y una sola réplica.** Con dos réplicas cada petición
-  caería en un mundo distinto y la clase vería datos incoherentes. Reiniciar el
-  proceso devuelve el laboratorio al estado inicial, que es justo lo que un
-  docente necesita entre sesiones.
+- **Estado en memoria con instantáneas en SQLite.** La memoria sigue siendo la
+  fuente de verdad (rápida y simple); cada 5 segundos el estado de cada equipo
+  se guarda en una base SQLite (`sqlite3` viene en la librería estándar, así
+  que sigue sin haber dependencias) y se restaura al arrancar. Un reinicio del
+  contenedor ya no borra el trabajo de la clase; para volver al estado inicial
+  están el botón de la interfaz y `POST /api/v1/reset`. Si prefiere el
+  laboratorio efímero de antes, arranque con `NETLAB_DB=off`; la ruta del
+  archivo se cambia con esa misma variable.
+- **Una sola réplica.** Con dos réplicas cada petición caería en un mundo
+  distinto y la clase vería datos incoherentes; SQLite aquí es una copia de
+  respaldo del estado, no una base compartida entre procesos.
 - **Sondeo silencioso.** La interfaz refresca con
   `GET /api/v1/topology?silent=1` cada 1,5 segundos. El parámetro `silent`
   evita que ese sondeo, y las sondas de salud de Docker o Kubernetes, ensucien

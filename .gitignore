@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 
+# Estado local del laboratorio
+netlab.db
+netlab.db-journal
+
 # Archivos temporales de Office
 ~$*
 

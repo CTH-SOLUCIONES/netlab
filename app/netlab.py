@@ -13,6 +13,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import threading
 import time
 import copy
@@ -215,6 +216,71 @@ LOCK = threading.RLock()
 WORLDS = {}
 MAX_EVENTS = 300
 
+# ---------------------------------------------------------------------------
+# Persistencia en SQLite (libreria estandar, sin dependencias nuevas).
+#
+# La memoria sigue siendo la fuente de verdad: cada equipo se guarda como una
+# instantanea JSON cada pocos segundos y se restaura al arrancar. Asi un
+# reinicio del contenedor no borra el trabajo de la clase, y el modelo de
+# concurrencia del codigo no cambia. Para volver al estado inicial estan el
+# boton de la interfaz y POST /api/v1/reset.
+#
+# NETLAB_DB controla la ruta del archivo; con "off" (o vacio) el laboratorio
+# vuelve a ser efimero. Si la ruta no es escribible se avisa y se sigue en
+# memoria: la clase nunca se queda sin laboratorio por un problema de disco.
+# ---------------------------------------------------------------------------
+DB_PATH = os.environ.get("NETLAB_DB", "netlab.db")
+DB = None
+DB_LOCK = threading.Lock()
+SAVE_EVERY_SECONDS = 5
+
+
+def db_init():
+    global DB
+    if not DB_PATH or DB_PATH.lower() in ("off", "none", "0"):
+        print("Persistencia desactivada (NETLAB_DB=off); el estado vive solo en memoria", flush=True)
+        return
+    try:
+        DB = sqlite3.connect(DB_PATH, check_same_thread=False)
+        DB.execute("CREATE TABLE IF NOT EXISTS worlds ("
+                   " team TEXT PRIMARY KEY,"
+                   " state TEXT NOT NULL,"
+                   " updated_at REAL NOT NULL)")
+        DB.commit()
+    except sqlite3.Error as e:
+        DB = None
+        print(f"Advertencia: no se pudo abrir {DB_PATH} ({e}); "
+              "el estado vivira solo en memoria", flush=True)
+        return
+    cargados = 0
+    for team, state in DB.execute("SELECT team, state FROM worlds"):
+        try:
+            WORLDS[team] = json.loads(state)
+            cargados += 1
+        except (json.JSONDecodeError, TypeError):
+            pass  # una fila corrupta no debe impedir arrancar
+    print(f"Persistencia en {DB_PATH}: {cargados} equipos restaurados", flush=True)
+
+
+def db_save(team=None):
+    """Guarda la instantanea de un equipo, o de todos si no se indica."""
+    if DB is None:
+        return
+    with LOCK:
+        equipos = [team] if team else list(WORLDS)
+        filas = [(t, json.dumps(WORLDS[t]), time.time())
+                 for t in equipos if t in WORLDS]
+    try:
+        with DB_LOCK:
+            DB.executemany(
+                "INSERT INTO worlds (team, state, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(team) DO UPDATE SET"
+                " state = excluded.state, updated_at = excluded.updated_at",
+                filas)
+            DB.commit()
+    except sqlite3.Error:
+        pass  # un fallo puntual de disco no debe tumbar una peticion ni el simulador
+
 
 def new_world():
     return {
@@ -348,8 +414,10 @@ def humanize_uptime(seconds):
 # interfaz de usuario se vea viva y las graficas cambien.
 # ---------------------------------------------------------------------------
 def simulator():
+    tick = 0
     while True:
         time.sleep(1)
+        tick += 1
         now = time.time()
         with LOCK:
             for world in list(WORLDS.values()):
@@ -388,6 +456,9 @@ def simulator():
                         iface["counters"]["tx_packets"] += max(1, bytes_s // 900)
                         if random.random() < 0.02:
                             iface["counters"]["input_errors"] += random.randint(1, 3)
+        # Instantanea periodica de todos los equipos, fuera del LOCK.
+        if tick % SAVE_EVERY_SECONDS == 0:
+            db_save()
 
 
 # ---------------------------------------------------------------------------
@@ -1144,6 +1215,7 @@ def r_health(ctx):
     return 200, {"status": "ok",
                  "uptime_seconds": int(time.time() - START_TIME),
                  "equipos": len(WORLDS),
+                 "persistencia": "sqlite" if DB is not None else "memoria",
                  "hora_servidor": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
 
 
@@ -1153,6 +1225,9 @@ def r_reset(ctx):
         WORLDS[ctx.team] = new_world()
     add_event(WORLDS[ctx.team], "info", None,
               f"Laboratorio del equipo '{ctx.team}' reiniciado al estado inicial")
+    # Se persiste de inmediato para que un reinicio del proceso justo despues
+    # del reset no resucite el estado anterior.
+    db_save(ctx.team)
     return 200, {"resultado": "laboratorio_reiniciado", "equipo": ctx.team}
 
 
@@ -1553,6 +1628,7 @@ class DualStackHTTPServer(ThreadingHTTPServer):
 
 
 def main():
+    db_init()
     get_world("shared")
     threading.Thread(target=simulator, daemon=True).start()
     try:
@@ -1563,9 +1639,25 @@ def main():
         srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
         pila = "IPv4"
     srv.daemon_threads = True
-    print(f"NetLab API escuchando en el puerto {PORT} ({pila})", flush=True)
-    print(f"Interfaz de usuario servida desde {UI_FILE}", flush=True)
-    srv.serve_forever()
+    print(f"""
+  ============================================================
+   NetLab listo ({pila})
+
+   Interfaz visual:  http://localhost:{PORT}/
+   Base de la API:   http://localhost:{PORT}/api/v1
+
+   Si publico el puerto con otro numero (-p 9000:{PORT}),
+   use ese numero en lugar de {PORT}.
+  ============================================================
+""", flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        db_save()
+        print("NetLab detenido" + ("; estado guardado." if DB is not None else "."),
+              flush=True)
 
 
 if __name__ == "__main__":
