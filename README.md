@@ -37,12 +37,16 @@ entorno `PORT` antes de arrancar.
 
 ### Opción 2: Docker
 
+La imagen pública (amd64 y arm64) está en GitHub Container Registry; no hay que
+clonar nada:
+
 ```bash
-docker compose up
+docker run -p 8080:8080 ghcr.io/cth-soluciones/netlab
 ```
 
-Igual que la opción 1, pero sin necesidad de tener Python instalado. También
-sirve `docker build -t netlab . && docker run -p 8080:8080 netlab`.
+Si ya clonó el repositorio, `docker compose up` hace lo mismo construyendo la
+imagen localmente. Vea [Construir la imagen](#construir-la-imagen) para los
+detalles del build.
 
 ### Opción 3: expuesto a internet (para academias)
 
@@ -79,9 +83,21 @@ las lecturas GET son abiertas a propósito y no hay registro de auditoría.
 | `cliente/netlab_cli.py` | Cliente interactivo en Python; 15 opciones de menú y un recorrido automático para proyectar |
 | `app/netlab.py` | La API y el simulador de dispositivos (un solo archivo, librería estándar) |
 | `app/ui.html` | La interfaz visual: topología, panel de puertos, registro HTTP en vivo |
-| `material/` | Diapositivas y material de apoyo de la sesión de formatos de datos (JSON, XML, YAML) |
+| `docs/` | Material de clase publicado en GitHub Pages (ver abajo) |
 | `Dockerfile`, `docker-compose.yml` | Ejecución en contenedor |
+| `.github/workflows/publicar-imagen.yml` | Publicación automática de la imagen en ghcr.io |
 | `k8s/` | Manifiestos y script para publicarlo en un cluster (opcional) |
+
+### Material de clase en línea
+
+Además de la guía, el material de apoyo está publicado en
+<https://cth-soluciones.github.io/netlab/>:
+
+- **[Anatomía de una petición HTTP](https://cth-soluciones.github.io/netlab/anatomia-api-http.html)** —
+  página interactiva sobre métodos, cabeceras y códigos de estado.
+- **[Comparativo JSON · XML · YAML](https://cth-soluciones.github.io/netlab/formatos-datos-automatizacion-redes.pdf)** —
+  diapositivas de la sesión de formatos de datos (también en
+  [PPTX](docs/formatos-datos-automatizacion-redes.pptx) editable).
 
 ## Cómo dar la clase
 
@@ -148,6 +164,40 @@ voluntad.
   `GET /api/v1/topology?silent=1` cada 1,5 segundos. El parámetro `silent`
   evita que ese sondeo, y las sondas de salud de Docker o Kubernetes, ensucien
   el registro que se proyecta a los estudiantes.
+
+## Construir la imagen
+
+No necesita construirla para usar el laboratorio: `ghcr.io/cth-soluciones/netlab`
+ya está publicada. Esta sección es para quien quiera modificar el código y
+producir su propia imagen.
+
+**Build local** (la arquitectura de su máquina):
+
+```bash
+docker build -t netlab .
+docker run -p 8080:8080 netlab
+```
+
+El `Dockerfile` copia solo `app/netlab.py` y `app/ui.html` sobre
+`python:3.12-slim` y corre como usuario sin privilegios; no hay `pip install`
+porque la API usa únicamente la librería estándar. Por eso el build tarda
+segundos y la imagen queda en unos 200 MB, casi todo de la imagen base.
+
+**Build multiarquitectura** (amd64 + arm64), para publicar en su propio
+registro:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t su-registro.ejemplo.com/netlab:latest --push .
+```
+
+**Publicación automática:** el workflow
+[`.github/workflows/publicar-imagen.yml`](.github/workflows/publicar-imagen.yml)
+reconstruye y publica `ghcr.io/cth-soluciones/netlab` (etiquetas `latest` y
+`sha-<commit>`) cada vez que cambia algo en `app/` o en el `Dockerfile` en la
+rama `main`. Si hace un fork, solo debe cambiar el nombre de la imagen en ese
+archivo: el `GITHUB_TOKEN` del propio workflow tiene permiso de publicar en el
+ghcr.io de su cuenta.
 
 ## Operación en Kubernetes (solo si usó la opción 3)
 

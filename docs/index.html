@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NetLab · material de clase</title>
+  <meta name="description" content="Material público del laboratorio NetLab: anatomía de una petición HTTP, comparativo JSON/XML/YAML y guía de práctica con curl.">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --fondo: #f3f2f2;
+      --tinta: #201e1d;
+      --acento: #ec3013;
+      --tarjeta: #ffffff;
+      --gris: #6b6764;
+    }
+    body {
+      background: var(--fondo);
+      color: var(--tinta);
+      font-family: "Archivo", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 48px 20px;
+    }
+    main { max-width: 880px; width: 100%; }
+    .logo {
+      font-weight: 800;
+      font-size: clamp(2.4rem, 7vw, 4rem);
+      letter-spacing: -0.03em;
+      line-height: 1;
+    }
+    .logo em { font-style: normal; color: var(--acento); }
+    .barra { width: 120px; height: 8px; background: var(--acento); margin: 18px 0 14px; }
+    .intro {
+      color: var(--gris);
+      font-size: 1.05rem;
+      line-height: 1.55;
+      max-width: 620px;
+      margin-bottom: 40px;
+    }
+    .tarjetas { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 18px; }
+    a.tarjeta {
+      display: block;
+      background: var(--tarjeta);
+      border: 2px solid var(--tinta);
+      border-radius: 14px;
+      padding: 22px 22px 20px;
+      text-decoration: none;
+      color: var(--tinta);
+      box-shadow: 5px 5px 0 var(--tinta);
+      transition: transform .12s ease, box-shadow .12s ease;
+    }
+    a.tarjeta:hover, a.tarjeta:focus-visible {
+      transform: translate(-2px, -2px);
+      box-shadow: 8px 8px 0 var(--acento);
+      outline: none;
+    }
+    .tarjeta .etiqueta {
+      display: inline-block;
+      font-size: .72rem;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: #fff;
+      background: var(--acento);
+      border-radius: 999px;
+      padding: 4px 10px;
+      margin-bottom: 14px;
+    }
+    .tarjeta h2 { font-size: 1.25rem; letter-spacing: -0.01em; margin-bottom: 8px; }
+    .tarjeta p { color: var(--gris); font-size: .95rem; line-height: 1.5; }
+    .tarjeta .extra { display: block; margin-top: 12px; font-size: .85rem; color: var(--acento); font-weight: 700; }
+    footer { margin-top: 44px; color: var(--gris); font-size: .9rem; line-height: 1.6; }
+    footer a { color: var(--tinta); font-weight: 700; }
+    footer a:hover { color: var(--acento); }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #e9e6e4;
+      border-radius: 6px;
+      padding: 2px 7px;
+      font-size: .88em;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 class="logo">Net<em>Lab</em></h1>
+    <div class="barra"></div>
+    <p class="intro">
+      Material público del laboratorio de automatización de redes por API:
+      cuatro dispositivos Cisco simulados que se administran con HTTP puro.
+      El laboratorio corre en su computador con
+      <code>docker run -p 8080:8080 ghcr.io/cth-soluciones/netlab</code>.
+    </p>
+
+    <nav class="tarjetas" aria-label="Material de clase">
+      <a class="tarjeta" href="anatomia-api-http.html">
+        <span class="etiqueta">Interactivo</span>
+        <h2>Anatomía de una petición HTTP</h2>
+        <p>Cómo funcionan los métodos, las cabeceras, los códigos de estado y el
+           cuerpo de una petición, pieza por pieza.</p>
+        <span class="extra">Abrir la página →</span>
+      </a>
+
+      <a class="tarjeta" href="formatos-datos-automatizacion-redes.pdf">
+        <span class="etiqueta">Diapositivas</span>
+        <h2>Comparativo JSON · XML · YAML</h2>
+        <p>Los tres formatos de datos de la automatización de redes: cuándo se
+           usa cada uno y cómo se leen.</p>
+        <span class="extra">Ver el PDF → <small>(también en
+          <a href="formatos-datos-automatizacion-redes.pptx" style="color:inherit">PPTX</a>)</small></span>
+      </a>
+
+      <a class="tarjeta" href="https://github.com/CTH-SOLUCIONES/netlab/blob/main/guia/GUIA-LAB-CURL.md">
+        <span class="etiqueta">Práctica</span>
+        <h2>Guía del laboratorio con curl</h2>
+        <p>11 bloques de ejercicios con comandos para Windows (CMD) y
+           Linux/macOS, retos finales y tablas de referencia.</p>
+        <span class="extra">Leer la guía →</span>
+      </a>
+    </nav>
+
+    <footer>
+      Código, guía y despliegue en
+      <a href="https://github.com/CTH-SOLUCIONES/netlab">github.com/CTH-SOLUCIONES/netlab</a>
+      · Licencia MIT · CTH Soluciones
+    </footer>
+  </main>
+</body>
+</html>

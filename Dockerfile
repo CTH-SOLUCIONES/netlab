@@ -2,6 +2,11 @@
 # La API usa solo la libreria estandar de Python: no hay pip install.
 FROM python:3.12-slim
 
+# Vincula el paquete de ghcr.io con el repositorio y su documentacion.
+LABEL org.opencontainers.image.source="https://github.com/CTH-SOLUCIONES/netlab" \
+      org.opencontainers.image.description="Laboratorio de automatizacion de redes: dispositivos Cisco simulados por API REST" \
+      org.opencontainers.image.licenses="MIT"
+
 WORKDIR /app
 COPY app/netlab.py app/ui.html ./
 
