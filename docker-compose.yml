@@ -1,0 +1,12 @@
+# Arranque en un comando:  docker compose up
+# Interfaz y API quedan en http://localhost:8080
+services:
+  netlab:
+    build: .
+    ports:
+      - "8080:8080"
+    # Si expone el laboratorio a internet, descomente y cambie las claves.
+    # environment:
+    #   NETLAB_ADMIN_KEY: cambie-esta-clave
+    #   NETLAB_READONLY_KEY: cambie-esta-tambien
+    restart: unless-stopped

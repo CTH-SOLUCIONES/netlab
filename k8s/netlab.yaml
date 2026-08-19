@@ -1,0 +1,158 @@
+# ---------------------------------------------------------------------------
+# NetLab: laboratorio de automatizacion de redes expuesto a internet.
+#
+# Estos manifiestos son OPCIONALES: solo los necesita una academia o docente
+# que quiera publicar el laboratorio en un cluster de Kubernetes para que los
+# estudiantes lleguen por una URL. Para la clase en un solo computador basta
+# con Python o Docker (ver README.md).
+#
+# Antes de aplicar, reemplace netlab.example.com por su dominio real (el
+# script k8s/desplegar.sh lo hace por usted) y ajuste ingressClassName y el
+# cluster-issuer a los de su cluster.
+#
+# El codigo de la aplicacion NO va en este archivo: se inyecta como ConfigMap
+# generado desde app/ con kubectl create configmap --from-file (ver desplegar.sh).
+# Asi se edita el codigo como codigo y no como YAML incrustado.
+#
+# Para borrar todo al terminar el curso:  kubectl delete namespace netlab
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netlab
+  labels:
+    proposito: clase-automatizacion
+    temporal: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netlab-api
+  namespace: netlab
+  labels:
+    app: netlab-api
+spec:
+  # Una sola replica a proposito: el estado del laboratorio vive en memoria.
+  # Con dos replicas cada peticion caeria en un mundo distinto y la clase
+  # veria resultados incoherentes.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: netlab-api
+  template:
+    metadata:
+      labels:
+        app: netlab-api
+      annotations:
+        # Fuerza el reinicio del pod cuando cambia el codigo del ConfigMap.
+        checksum/codigo: "SUSTITUIDO_POR_EL_SCRIPT"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: api
+          # Imagen publica multiarquitectura (amd64 y arm64). No se requiere
+          # construir ni publicar una imagen propia: el codigo entra por el
+          # ConfigMap, lo que hace el despliegue inmune a fallos del registro.
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-u", "/app/netlab.py"]
+          env:
+            - name: PORT
+              value: "8080"
+            - name: UI_FILE
+              value: /app/ui.html
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            # Si expone el laboratorio a internet, defina claves propias:
+            # - name: NETLAB_ADMIN_KEY
+            #   valueFrom: { secretKeyRef: { name: netlab-claves, key: admin } }
+            # - name: NETLAB_READONLY_KEY
+            #   valueFrom: { secretKeyRef: { name: netlab-claves, key: lectura } }
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: codigo
+              mountPath: /app
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: codigo
+          configMap:
+            name: netlab-codigo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netlab-api
+  namespace: netlab
+spec:
+  type: ClusterIP
+  selector:
+    app: netlab-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: netlab
+  namespace: netlab
+  annotations:
+    # Ajuste el emisor de certificados al que exista en su cluster, o elimine
+    # esta anotacion y el bloque tls si publica sin cert-manager.
+    cert-manager.io/cluster-issuer: letsencrypt
+    # El flujo de eventos en vivo (SSE) se corta si nginx acumula la respuesta.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # La clase entera consulta a la vez desde una misma IP de salida; sin esto
+    # el controlador podria limitar las peticiones de los estudiantes.
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: netlab.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: netlab-api
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - netlab.example.com
+      secretName: netlab-tls
