@@ -2,26 +2,50 @@
 # como ghcr.io/cth-soluciones/netlab, en dos arquitecturas (amd64 y arm64) para
 # que sirva igual en un PC de sala de cómputo, en una Mac o en un servidor ARM.
 #
-# Se ejecuta cuando cambia el código de la aplicación o este mismo archivo, y
-# también a mano desde la pestaña Actions (workflow_dispatch).
+# Se ejecuta cuando cambia el código de la aplicación, sus pruebas o este mismo
+# archivo; con cada etiqueta de versión (v1.0.0 publica :1.0.0 y :1.0), y a mano
+# desde la pestaña Actions (workflow_dispatch).
+#
+# Antes de publicar corren las pruebas: si fallan, no sale imagen.
 name: Publicar imagen
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
     paths:
       - "app/**"
+      - "tests/**"
       - "Dockerfile"
       - ".github/workflows/publicar-imagen.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  imagen:
+  pruebas:
     runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      # La misma versión de Python que la imagen (python:3.12-slim).
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Solo librería estándar: no hay pip install.
+      - name: Correr las pruebas
+        run: python3 -m unittest discover -s tests -v
+
+  imagen:
+    needs: pruebas
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Descargar el código
         uses: actions/checkout@v4
@@ -40,6 +64,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # En main: latest y sha-<commit>. Con la etiqueta v1.0.0: 1.0.0, 1.0,
+      # latest y sha-<commit>, para que una clase pueda fijar la versión.
       - name: Calcular etiquetas
         id: meta
         uses: docker/metadata-action@v5
@@ -47,6 +73,8 @@ jobs:
           images: ghcr.io/cth-soluciones/netlab
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=sha
 
       - name: Construir y publicar
