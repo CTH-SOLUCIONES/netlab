@@ -69,10 +69,11 @@ Solo necesita `curl`, que ya viene instalado en macOS, en Linux y en Windows 10
 curl --version
 ```
 
-> **Nota para PowerShell:** en PowerShell, `curl` es un alias de
-> `Invoke-WebRequest`, que usa otra sintaxis. Escriba `curl.exe` (con el `.exe`)
-> y siga las instrucciones de Windows CMD de esta guía, o simplemente abra CMD
-> (`cmd` en el menú inicio), que es lo que esta guía usa para Windows.
+> **Nota para PowerShell:** los bloques de Windows de esta guía son de **CMD**,
+> no de PowerShell. Si su terminal es PowerShell, escriba `cmd` y pulse Enter
+> para abrir CMD, y trabaje ahí. Cambiar `curl` por `curl.exe` no basta: en
+> PowerShell `curl` es un alias de `Invoke-WebRequest` con otra sintaxis, y
+> además las variables de esta guía (`%B%`, `%K%`) solo existen en CMD.
 
 ### Cómo leer esta guía en dos sistemas
 
@@ -97,9 +98,9 @@ comillas y las variables:
 
 ## Anatomía de un comando curl
 
-Todo comando `curl` de este laboratorio se compone de cinco partes. Entender
-estas cinco partes es el objetivo central de la clase, porque son las mismas
-cinco partes de cualquier petición HTTP, sin importar si la escribe usted a mano,
+Todo comando `curl` de este laboratorio se compone de seis partes. Entender
+estas seis partes es el objetivo central de la clase, porque son las mismas
+seis partes de cualquier petición HTTP, sin importar si la escribe usted a mano,
 la genera Python o la envía Ansible.
 
 ```
@@ -367,7 +368,8 @@ curl -s -o NUL -w "%{content_type}\n" -H "Accept: application/json" %B%/devices/
 Confundir estos dos códigos hace perder horas de diagnóstico. La diferencia es
 precisa:
 
-- **401 Unauthorized** — *no sé quién es usted*. Falta la credencial o no se envió.
+- **401 Unauthorized** — *no sé quién es usted*. La credencial falta o no es
+  válida.
 - **403 Forbidden** — *sé quién es usted, y no le alcanza*. La credencial es
   válida pero el permiso no.
 
@@ -386,7 +388,9 @@ curl -i -X POST %B%/devices/csr-core-01/interfaces/Te1/1/1/shutdown
 ```
 
 Observe la cabecera `WWW-Authenticate` en la respuesta: el servidor le está
-indicando *cómo* debe autenticarse.
+indicando *cómo* debe autenticarse. Repita el comando con una clave inventada
+(`-H "X-API-Key: mala"`): también da `401`, porque el servidor no puede saber
+quién es usted.
 
 **3.2 Con credencial válida pero sin permiso: 403**
 
@@ -825,13 +829,17 @@ curl -i %B%/demo/status/500
 curl -i %B%/demo/status/503
 ```
 
+`/demo/status/301` solo devuelve el código: no trae cabecera `Location`, así que
+no hay a dónde ir. Para ver una redirección completa, con su `Location`, use
+`/demo/redirect` (más abajo).
+
 **Las cinco familias:**
 
 | Familia | Significado | Quién debe actuar |
 |---|---|---|
 | `1xx` | Informativo, la cosa sigue en marcha | Nadie |
 | `2xx` | Éxito | Nadie, siga adelante |
-| `3xx` | Redirección, está en otro lado | El cliente, siguiendo `Location` |
+| `3xx` | Redirección, está en otro lado | El cliente: siga `Location` (ejemplo más abajo, con `/demo/redirect`) |
 | `4xx` | Error **del cliente**: su petición está mal | **Usted**: corrija el comando |
 | `5xx` | Error **del servidor** | El dueño de la API |
 
@@ -883,36 +891,55 @@ Este bloque explica cómo dos ingenieros evitan sobrescribirse el trabajo.
 
 **9.1 Obtener el ETag**
 
-El `ETag` es una huella de la configuración del recurso.
+El `ETag` es una huella de la configuración del recurso. Pídalo y muestre solo
+esa línea de la respuesta:
 
 **Linux / macOS:**
 
 ```bash
-curl -i $B/devices/csr-core-01/interfaces/Te1/1/1 | grep -i etag
+curl -s -i $B/devices/csr-core-01/interfaces/Te1/1/1 | grep -i '^etag'
 ```
 
 **Windows (CMD):**
 
 ```bat
-curl -i %B%/devices/csr-core-01/interfaces/Te1/1/1 | findstr /i etag
+curl -s -i %B%/devices/csr-core-01/interfaces/Te1/1/1 | findstr /i /b "etag"
+```
+
+La respuesta es una sola línea, por ejemplo `ETag: "aee70c2e4a688875"`. Las
+comillas dobles forman parte del ETag, y la terminal las trata de forma distinta
+según el sistema. Para no pelear con ellas, guarde solo el valor hexadecimal (lo
+que está entre las comillas) en la variable `ET`: los comandos siguientes le
+agregan las comillas.
+
+**Linux / macOS** (la variable se llena sola):
+
+```bash
+ET=$(curl -s -i $B/devices/csr-core-01/interfaces/Te1/1/1 | grep -i '^etag' | tr -d '\r' | cut -d'"' -f2)
+echo $ET
+```
+
+**Windows (CMD)** (reemplace `PEGUE_AQUI_EL_VALOR` por el valor de su respuesta, sin comillas):
+
+```bat
+set "ET=PEGUE_AQUI_EL_VALOR"
+echo %ET%
 ```
 
 **9.2 Ahorrar ancho de banda: 304**
 
-Pregunte "¿cambió desde esta versión?". Copie el valor del paso anterior
-(incluidas las comillas internas) donde dice `PEGUE_AQUI_SU_ETAG`:
+Pregunte "¿cambió desde esta versión?" enviando el ETag que guardó:
 
 **Linux / macOS:**
 
 ```bash
-curl -i -H 'If-None-Match: "PEGUE_AQUI_SU_ETAG"' \
-  $B/devices/csr-core-01/interfaces/Te1/1/1
+curl -i -H "If-None-Match: \"$ET\"" $B/devices/csr-core-01/interfaces/Te1/1/1
 ```
 
 **Windows (CMD):**
 
 ```bat
-curl -i -H "If-None-Match: \"PEGUE_AQUI_SU_ETAG\"" %B%/devices/csr-core-01/interfaces/Te1/1/1
+curl -i -H "If-None-Match: \"%ET%\"" %B%/devices/csr-core-01/interfaces/Te1/1/1
 ```
 
 Responde **`304 Not Modified`** sin cuerpo: *no ha cambiado, use su copia*. Así
@@ -923,10 +950,10 @@ funciona la caché de todo internet.
 Guarde el ETag, deje que otra persona (o usted mismo desde la interfaz web)
 modifique ese puerto, e intente escribir con el ETag viejo.
 
-**Linux / macOS** (captura el ETag automáticamente):
+**Linux / macOS:**
 
 ```bash
-ET=$(curl -s -i $B/devices/csr-core-01/interfaces/Te1/1/1 | grep -i '^etag' | tr -d '\r' | cut -d' ' -f2)
+ET=$(curl -s -i $B/devices/csr-core-01/interfaces/Te1/1/1 | grep -i '^etag' | tr -d '\r' | cut -d'"' -f2)
 
 # Alguien más cambia la interfaz entre estos dos comandos
 curl -s -o /dev/null -X PATCH -H "$K" -H "Content-Type: application/json" \
@@ -934,18 +961,19 @@ curl -s -o /dev/null -X PATCH -H "$K" -H "Content-Type: application/json" \
 
 # Su escritura con el ETag viejo es rechazada
 curl -i -X PATCH -H "$K" -H "Content-Type: application/json" \
-  -H "If-Match: $ET" -d '{"description": "MI-CAMBIO"}' \
+  -H "If-Match: \"$ET\"" -d '{"description": "MI-CAMBIO"}' \
   $B/devices/csr-core-01/interfaces/Te1/1/1
 ```
 
-**Windows (CMD)** (copie el ETag a mano con el paso 9.1, es el mismo ejercicio):
+**Windows (CMD)** (es el mismo ejercicio; el ETag se guarda a mano como en 9.1):
 
 ```bat
-curl -i %B%/devices/csr-core-01/interfaces/Te1/1/1 | findstr /i etag
+curl -s -i %B%/devices/csr-core-01/interfaces/Te1/1/1 | findstr /i /b "etag"
+set "ET=PEGUE_AQUI_EL_VALOR"
 
 curl -s -o NUL -X PATCH -H "%K%" -H "Content-Type: application/json" -d "{\"description\": \"CAMBIO-DE-OTRO\"}" %B%/devices/csr-core-01/interfaces/Te1/1/1
 
-curl -i -X PATCH -H "%K%" -H "Content-Type: application/json" -H "If-Match: \"PEGUE_AQUI_SU_ETAG\"" -d "{\"description\": \"MI-CAMBIO\"}" %B%/devices/csr-core-01/interfaces/Te1/1/1
+curl -i -X PATCH -H "%K%" -H "Content-Type: application/json" -H "If-Match: \"%ET%\"" -d "{\"description\": \"MI-CAMBIO\"}" %B%/devices/csr-core-01/interfaces/Te1/1/1
 ```
 
 **`412 Precondition Failed`**: el recurso cambió desde que usted lo leyó. Sin
@@ -1021,7 +1049,7 @@ for i in 1 2 3 4 5 6; do curl -s -o /dev/null -w "%{http_code} " $B/demo/rate-li
 **Windows (CMD):**
 
 ```bat
-for /L %i in (1,1,6) do @curl -s -o NUL -w "%{http_code} " %B%/demo/rate-limit
+(for /L %i in (1,1,6) do @curl -s -o NUL -w "%{http_code} " %B%/demo/rate-limit) & echo.
 ```
 
 (Recuerde: dentro de un archivo `.bat` sería `%%i` y `%%{http_code}`.)
@@ -1061,9 +1089,11 @@ Resuélvalos usando solo lo aprendido. Cada uno requiere combinar varios pasos.
    `sw-access-02`, mueva los puertos `Gi0/8` y `Gi0/9` a esa VLAN, y verifique
    con una sola consulta filtrada que ambos quedaron ahí.
 
-2. **Auditoría.** Liste todas las interfaces caídas de los cuatro dispositivos y
-   determine cuáles están apagadas administrativamente y cuáles cayeron por un
-   enlace vecino. Pista: compare `admin_status` con `oper_status`.
+2. **Auditoría.** Antes de empezar, apague un enlace del core, por ejemplo
+   `Te1/1/2`, para que haya una caída por vecino que distinguir. Liste todas las
+   interfaces caídas de los cuatro dispositivos y determine cuáles están
+   apagadas administrativamente y cuáles cayeron por un enlace vecino. Pista:
+   compare `admin_status` con `oper_status`. Al terminar, levante el enlace.
 
 3. **Ventana de mantenimiento.** Apague el uplink `Te1/1/2` del core, compruebe
    en la topología qué dispositivo quedó aislado, confirme por API que su uplink
@@ -1077,7 +1107,7 @@ Resuélvalos usando solo lo aprendido. Cada uno requiere combinar varios pasos.
 
 6. **Trabajo en equipo aislado.** Agregue `-H "X-Lab-Team: rojo"` a sus comandos.
    Tendrá una copia privada de la red completa, independiente de la del resto del
-   curso. Verifique que una VLAN creada con ese encabezado no aparece sin él, y
+   curso. Verifique que una VLAN creada con esa cabecera no aparece sin ella, y
    seleccione su equipo en la interfaz visual para verla.
 
 ---
@@ -1086,14 +1116,14 @@ Resuélvalos usando solo lo aprendido. Cada uno requiere combinar varios pasos.
 
 ### Verbos
 
-| Verbo | Intención | ¿Modifica? | ¿Repetirlo es seguro? | Código típico |
+| Verbo | Intención | ¿Modifica? | ¿Idempotente? | Código típico |
 |---|---|---|---|---|
 | `GET` | Leer | No | Sí | `200` |
 | `HEAD` | Leer solo cabeceras | No | Sí | `200` |
 | `OPTIONS` | Consultar qué se permite | No | Sí | `204` |
 | `POST` | Crear o ejecutar una acción | Sí | **No** | `201`, `202`, `200` |
 | `PUT` | Reemplazar por completo | Sí | Sí | `200` |
-| `PATCH` | Modificar parcialmente | Sí | Depende | `200` |
+| `PATCH` | Modificar parcialmente | Sí | No por definición; puede serlo según el cambio | `200` |
 | `DELETE` | Eliminar | Sí | Sí (en su efecto) | `204` |
 
 ### Códigos que verá en este laboratorio
@@ -1107,8 +1137,8 @@ Resuélvalos usando solo lo aprendido. Cada uno requiere combinar varios pasos.
 | `302` | Found | Redirección de demostración |
 | `304` | Not Modified | Su `If-None-Match` coincide |
 | `400` | Bad Request | JSON malformado o parámetro no numérico |
-| `401` | Unauthorized | Falta `X-API-Key` |
-| `403` | Forbidden | Clave de solo lectura, o clave inválida |
+| `401` | Unauthorized | Falta `X-API-Key` o la clave no es válida |
+| `403` | Forbidden | Clave válida de solo lectura en un método de escritura |
 | `404` | Not Found | Dispositivo, interfaz o VLAN inexistente |
 | `405` | Method Not Allowed | Verbo incorrecto; lea `Allow` |
 | `409` | Conflict | VLAN duplicada, en uso, protegida, o equipo reiniciando |
@@ -1143,9 +1173,9 @@ Resuélvalos usando solo lo aprendido. Cada uno requiere combinar varios pasos.
 | `400 json_malformado` en Linux/macOS | Comillas dobles alrededor del JSON | Use comillas simples: `-d '{"a":1}'` |
 | `400 json_malformado` en Windows | Comillas internas sin escapar | Escápelas: `-d "{\"a\":1}"` |
 | CMD dice "'curl' no se reconoce" | Windows anterior a 10 (1803) o PATH roto | Actualice Windows o instale curl desde curl.se |
-| PowerShell responde algo rarísimo | `curl` es alias de `Invoke-WebRequest` | Escriba `curl.exe`, o use CMD |
+| PowerShell responde algo rarísimo | `curl` es alias de `Invoke-WebRequest`, y `%B%` y `%K%` son sintaxis de CMD | Escriba `cmd` para abrir CMD y trabaje ahí; `curl.exe` no basta |
 | El filtro no se aplica | La terminal se comió el `?` o el `&` | Ponga la URL entre comillas dobles |
-| `401` con la clave puesta | Falta el espacio o el nombre está mal escrito | `-H "X-API-Key: netlab-admin-2026"` |
+| `401` con la clave puesta | El nombre de la cabecera está mal escrito, le faltan los dos puntos, o la clave es inválida | `-H "X-API-Key: netlab-admin-2026"` |
 | `404` en una interfaz | Nombre mal escrito | Liste primero `/interfaces` y copie el nombre |
 | `422` al hacer `PUT` | Envió campos parciales | Use `PATCH`, o envíe la representación completa |
 | Todo da `000` o "Connection refused" | El laboratorio no está corriendo | Arranque `python3 app/netlab.py` o `docker compose up` |

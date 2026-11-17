@@ -19,6 +19,7 @@ import time
 import copy
 import random
 import hashlib
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -33,13 +34,16 @@ START_TIME = time.time()
 # entre 401 (no te identificaste) y 403 (te identificaste pero no puedes).
 # Si el laboratorio se expone a internet, cambie las claves por variables de
 # entorno en lugar de usar las de los ejemplos de la guia.
-ADMIN_KEY = os.environ.get("NETLAB_ADMIN_KEY", "netlab-admin-2026")
-READONLY_KEY = os.environ.get("NETLAB_READONLY_KEY", "netlab-lectura-2026")
+CLAVE_ADMIN_FABRICA = "netlab-admin-2026"
+CLAVE_LECTURA_FABRICA = "netlab-lectura-2026"
+ADMIN_KEY = os.environ.get("NETLAB_ADMIN_KEY", CLAVE_ADMIN_FABRICA)
+READONLY_KEY = os.environ.get("NETLAB_READONLY_KEY", CLAVE_LECTURA_FABRICA)
 API_KEYS = {
     ADMIN_KEY: {"role": "admin", "owner": "instructor"},
     READONLY_KEY: {"role": "readonly", "owner": "estudiante"},
 }
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+WWW_AUTHENTICATE = {"WWW-Authenticate": 'ApiKey realm="netlab", header="X-API-Key"'}
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +219,9 @@ def build_seed():
 LOCK = threading.RLock()
 WORLDS = {}
 MAX_EVENTS = 300
+# Tope de mundos por proceso, contando "shared". Cada mundo pesa unos 60 KB;
+# sin tope, cualquiera sin clave podia crear miles cambiando X-Lab-Team.
+MAX_EQUIPOS = 50
 
 # ---------------------------------------------------------------------------
 # Persistencia en SQLite (libreria estandar, sin dependencias nuevas).
@@ -253,7 +260,14 @@ def db_init():
               "el estado vivira solo en memoria", flush=True)
         return
     cargados = 0
-    for team, state in DB.execute("SELECT team, state FROM worlds"):
+    # Se restauran como maximo MAX_EQUIPOS: "shared" siempre tiene su cupo y,
+    # del resto, entran los equipos que se usaron mas recientemente.
+    filas = DB.execute(
+        "SELECT team, state FROM worlds WHERE team = 'shared'"
+        " UNION ALL"
+        " SELECT * FROM (SELECT team, state FROM worlds WHERE team <> 'shared'"
+        " ORDER BY updated_at DESC LIMIT ?)", (MAX_EQUIPOS - 1,))
+    for team, state in filas:
         try:
             WORLDS[team] = json.loads(state)
             cargados += 1
@@ -269,7 +283,7 @@ def db_save(team=None):
     with LOCK:
         equipos = [team] if team else list(WORLDS)
         filas = [(t, json.dumps(WORLDS[t]), time.time())
-                 for t in equipos if t in WORLDS]
+                 for t in equipos if t in WORLDS and t not in PROVISIONALES]
     try:
         with DB_LOCK:
             DB.executemany(
@@ -294,11 +308,66 @@ def new_world():
     }
 
 
+# Mundos que creo una peticion que aun no termina: equipo -> esa peticion. Si
+# la peticion falla, el mundo se descarta y no gasta cupo; si otra peticion lo
+# usa mientras tanto, deja de ser provisional y se queda.
+PROVISIONALES = {}
+
+
 def get_world(team):
+    """Devuelve el mundo del equipo; si no existe, lo crea cuando queda cupo."""
+    propia = object()
+    world = abrir_mundo(team, propia)
+    cerrar_mundo(team, propia, exito=True)
+    return world
+
+
+def abrir_mundo(team, peticion):
+    """Como get_world, pero el mundo que cree queda provisional hasta que la
+    peticion lo cierre con cerrar_mundo."""
     with LOCK:
-        if team not in WORLDS:
-            WORLDS[team] = new_world()
+        if team in WORLDS:
+            if PROVISIONALES.get(team) is not peticion:
+                PROVISIONALES.pop(team, None)
+            return WORLDS[team]
+        exigir_cupo(team)
+        WORLDS[team] = new_world()
+        PROVISIONALES[team] = peticion
         return WORLDS[team]
+
+
+def cerrar_mundo(team, peticion, exito):
+    """Confirma el mundo que la peticion dejo provisional, o lo descarta si fallo."""
+    with LOCK:
+        if PROVISIONALES.get(team) is not peticion:
+            return
+        del PROVISIONALES[team]
+        if not exito:
+            del WORLDS[team]
+
+
+def reiniciar_mundo(team):
+    """Reemplaza el mundo del equipo por uno inicial; si no existia, necesita cupo."""
+    with LOCK:
+        exigir_cupo(team)
+        PROVISIONALES.pop(team, None)
+        WORLDS[team] = new_world()
+        return WORLDS[team]
+
+
+def exigir_cupo(team):
+    """Un equipo nuevo solo entra si no se ha llegado a MAX_EQUIPOS."""
+    if team in WORLDS or len(WORLDS) < MAX_EQUIPOS:
+        return
+    raise ApiError(403, "limite_de_equipos",
+                   f"Este servidor llego al tope de {MAX_EQUIPOS} equipos (X-Lab-Team), "
+                   "contando 'shared'. Para liberar cupo, reinicie NetLab con la base "
+                   "vacia (borre el archivo de NETLAB_DB o arranque con NETLAB_DB=off), "
+                   "o trabaje con un equipo que ya exista",
+                   {"tope": MAX_EQUIPOS,
+                    "equipos_existentes": "GET /api/v1/stats los lista en equipos_activos",
+                    "como_liberar": "los equipos solo se borran al reiniciar NetLab con la "
+                                    "base vacia o con NETLAB_DB=off"})
 
 
 def add_event(world, level, device, message):
@@ -651,18 +720,22 @@ def prefix_to_mask(p):
 # ---------------------------------------------------------------------------
 # Endpoints demostrativos (rate limit y retardo)
 # ---------------------------------------------------------------------------
-RATE_STATE = {}
+# IP -> instantes de sus peticiones dentro de la ventana. Se mantiene ordenado
+# por la ultima peticion de cada IP, la mas antigua primero, para purgar las
+# que ya salieron de la ventana sin recorrer todo el diccionario.
+RATE_STATE = OrderedDict()
 RATE_LIMIT = 5
 RATE_WINDOW = 10.0
 
 
 def check_rate_limit(ip):
-    now = time.time()
+    now = time.monotonic()
     with LOCK:
-        hits = [t for t in RATE_STATE.get(ip, []) if now - t < RATE_WINDOW]
+        purgar_rate_state(now)
+        hits = [t for t in RATE_STATE.get(ip, ()) if now - t < RATE_WINDOW]
         if len(hits) >= RATE_LIMIT:
             retry = int(RATE_WINDOW - (now - hits[0])) + 1
-            RATE_STATE[ip] = hits
+            RATE_STATE[ip] = hits  # sin peticion nueva, conserva su lugar
             raise ApiError(429, "demasiadas_peticiones",
                            f"Limite de {RATE_LIMIT} peticiones cada {int(RATE_WINDOW)} segundos",
                            {"limite": RATE_LIMIT, "ventana_segundos": RATE_WINDOW},
@@ -671,7 +744,17 @@ def check_rate_limit(ip):
                             "X-RateLimit-Remaining": "0"})
         hits.append(now)
         RATE_STATE[ip] = hits
+        RATE_STATE.move_to_end(ip)
         return len(hits)
+
+
+def purgar_rate_state(now):
+    """Quita las IP cuya ultima peticion ya salio de la ventana."""
+    while RATE_STATE:
+        ip, hits = next(iter(RATE_STATE.items()))
+        if now - hits[-1] < RATE_WINDOW:
+            return
+        del RATE_STATE[ip]
 
 
 # ---------------------------------------------------------------------------
@@ -687,19 +770,37 @@ def route(pattern, methods):
     return deco
 
 
+def cabecera_allow(permitidos):
+    """Metodos para la cabecera Allow: OPTIONS siempre, HEAD solo donde hay GET."""
+    metodos = set(permitidos) | {"OPTIONS"}
+    if "GET" in metodos:
+        metodos.add("HEAD")
+    return ", ".join(sorted(metodos))
+
+
 class Ctx:
     """Todo lo que un manejador necesita saber de la peticion."""
 
-    def __init__(self, handler, method, path, query, body, world, team, role, ip):
+    def __init__(self, handler, method, path, query, body, team, role, ip):
         self.h = handler
         self.method = method
         self.path = path
         self.query = query
         self.body = body
-        self.world = world
         self.team = team
         self.role = role
         self.ip = ip
+
+    @property
+    def world(self):
+        # El mundo se crea al primer uso y no al recibir la peticion: el
+        # indice, la salud y las demos no gastan cupo de equipo, y un equipo
+        # nuevo sin cupo recibe el 403 aqui. Queda provisional hasta terminar().
+        return abrir_mundo(self.team, self)
+
+    def terminar(self, exito):
+        """Una peticion fallida no deja creado el mundo de un equipo nuevo."""
+        cerrar_mundo(self.team, self, exito)
 
     def q(self, name, default=None):
         v = self.query.get(name)
@@ -899,7 +1000,10 @@ def r_ifaces(ctx, dev_id):
 
 # El nombre de la interfaz lleva barras (GigabitEthernet1/0/1). Se acepta tal
 # cual o codificado como %2F, para que nadie tenga que escapar nada en curl.
-@route(r"/api/v1/devices/([^/]+)/interfaces/(.+)", ["GET", "PUT", "PATCH"])
+# Las rutas de accion (.../shutdown y .../no-shutdown) quedan fuera de este
+# patron; si no, OPTIONS y Allow mezclarian los metodos de las dos rutas.
+@route(r"/api/v1/devices/([^/]+)/interfaces/(.+(?<!/shutdown)(?<!/no-shutdown))",
+       ["GET", "PUT", "PATCH"])
 def r_iface(ctx, dev_id, if_name):
     dev = find_device(ctx, dev_id)
     iface = find_iface(ctx, dev, if_name)
@@ -1221,9 +1325,8 @@ def r_health(ctx):
 
 @route(r"/api/v1/reset", ["POST"])
 def r_reset(ctx):
-    with LOCK:
-        WORLDS[ctx.team] = new_world()
-    add_event(WORLDS[ctx.team], "info", None,
+    world = reiniciar_mundo(ctx.team)
+    add_event(world, "info", None,
               f"Laboratorio del equipo '{ctx.team}' reiniciado al estado inicial")
     # Se persiste de inmediato para que un reinicio del proceso justo despues
     # del reset no resucite el estado anterior.
@@ -1266,7 +1369,7 @@ def r_status(ctx, code):
         412: "Precondition Failed, la condicion If-Match no se cumplio",
         415: "Unsupported Media Type, falta o sobra el Content-Type",
         422: "Unprocessable Content, sintaxis valida pero datos invalidos",
-        429: "Too Many Requests, superó el limite de peticiones",
+        429: "Too Many Requests, supero el limite de peticiones",
         500: "Internal Server Error, fallo del servidor",
         502: "Bad Gateway, un intermediario recibio una respuesta invalida",
         503: "Service Unavailable, el servicio no esta disponible",
@@ -1307,10 +1410,40 @@ def r_redirect(ctx):
 # ---------------------------------------------------------------------------
 # Servidor HTTP
 # ---------------------------------------------------------------------------
+# 204 y 304 nunca llevan cuerpo, y por eso tampoco Content-Length (RFC 9110).
+SIN_CUERPO = (204, 304)
+# Forma textual mas larga de una IP: IPv6 con IPv4 al final (45 caracteres).
+MAX_LARGO_IP = 45
+MAX_CONEXIONES = 200
+
+# La interfaz recibe la clave de administrador solo si es la de fabrica, que
+# ya es publica en la guia. Una clave propia nunca viaja en la pagina: la
+# interfaz la pide la primera vez que la necesita.
+MARCADOR_CLAVE = b"/*NETLAB_CLAVE_ADMIN*/null"
+
+
+def ui_con_clave(html):
+    clave = json.dumps(ADMIN_KEY) if ADMIN_KEY == CLAVE_ADMIN_FABRICA else "null"
+    return html.replace(MARCADOR_CLAVE, clave.encode())
+
+
+def serializar(payload):
+    if payload is None:
+        return b""
+    if isinstance(payload, (bytes, bytearray)):
+        return bytes(payload)
+    if isinstance(payload, str):
+        return payload.encode("utf-8")
+    return json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "NetLabAPI/1.0"
     sys_version = ""
+    # Segundos que una conexion puede pasar sin enviar nada. El SSE escribe
+    # cada segundo y /demo/slow dura como mucho 20 s, asi que no les afecta.
+    timeout = 30
 
     # ---- utilidades de respuesta -----------------------------------------
     def _cors(self):
@@ -1326,24 +1459,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, status, payload=None, extra=None, ctype="application/json; charset=utf-8",
               head_only=False):
-        body = b""
-        if payload is not None:
-            if isinstance(payload, (bytes, bytearray)):
-                body = bytes(payload)
-            elif isinstance(payload, str):
-                body = payload.encode("utf-8")
-            else:
-                body = json.dumps(payload, ensure_ascii=False, indent=2,
-                                  default=str).encode("utf-8")
+        body = serializar(payload)
         self.send_response(status)
         if payload is not None:
             self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        if status not in SIN_CUERPO:
+            self.send_header("Content-Length", str(len(body)))
         self._cors()
         self.send_header("X-Request-Id", self._req_id)
         self.send_header("X-NetLab-Team", self._team)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
+        if self._cuerpo_sin_leer():
+            # Lo que queda del cuerpo en el socket se leeria como la siguiente
+            # peticion de la conexion keep-alive; se cierra para evitarlo.
+            self.send_header("Connection", "close")
+            self.close_connection = True
         self.end_headers()
         if body and not head_only:
             try:
@@ -1351,6 +1482,24 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
         self._status = status
+
+    def _send_api_error(self, e, head_only=False):
+        payload = {"error": {"codigo": e.code, "mensaje": e.message,
+                             "estado_http": e.status}}
+        if e.detail:
+            payload["error"]["detalle"] = e.detail
+        self._send(e.status, payload, e.headers, head_only=head_only)
+
+    def _cuerpo_sin_leer(self):
+        """True si la peticion declaro un cuerpo que sigue sin leer en el socket."""
+        if self._cuerpo_leido:
+            return False
+        if self.headers.get("Transfer-Encoding"):
+            return True  # chunked no se interpreta, asi que nunca se lee
+        try:
+            return int(self.headers.get("Content-Length") or 0) != 0
+        except ValueError:
+            return True
 
     # ---- registro de peticiones ------------------------------------------
     def log_message(self, fmt, *args):
@@ -1365,9 +1514,13 @@ class Handler(BaseHTTPRequestHandler):
         # registraran, ahogarian el registro que se proyecta a los estudiantes.
         if urlparse(self.path).path.rstrip("/") == "/api/v1/health":
             return
-        world = get_world(self._team)
         dur = round((time.time() - started) * 1000, 1)
         with LOCK:
+            # Registrar no crea mundos: si la peticion fallo o no toco el
+            # laboratorio, un equipo nuevo sigue sin existir y no gasta cupo.
+            world = WORLDS.get(self._team)
+            if world is None:
+                return
             world["req_seq"] += 1
             world["requests"].append({
                 "seq": world["req_seq"], "ts": time.time(),
@@ -1382,18 +1535,30 @@ class Handler(BaseHTTPRequestHandler):
             s["by_status"][str(status)] = s["by_status"].get(str(status), 0) + 1
 
     # ---- despacho --------------------------------------------------------
-    def _dispatch(self, head_only=False):
-        started = time.time()
+    def _identificar(self):
+        """Prepara el estado de una peticion. La misma instancia atiende todas
+        las peticiones de una conexion keep-alive, asi que nada se hereda."""
         self._status = 500
-        self._ip = (self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-                    or self.client_address[0])
+        self._cuerpo_leido = False
+        self._ip = self._ip_del_cliente()
+        self._team = re.sub(r"[^A-Za-z0-9_-]", "", self.headers.get("X-Lab-Team", "") or "")[:24] or "shared"
+        self._req_id = hashlib.md5(f"{time.time()}{self.path}{self._ip}".encode()).hexdigest()[:12]
+
+    def _ip_del_cliente(self):
+        ip = (self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+              or self.client_address[0])
         # En pila dual, los clientes IPv4 llegan como ::ffff:A.B.C.D; se
         # normaliza para que el registro proyectado y el limite de peticiones
         # usen la direccion que la clase reconoce.
-        if self._ip.startswith("::ffff:"):
-            self._ip = self._ip[7:]
-        self._team = re.sub(r"[^A-Za-z0-9_-]", "", self.headers.get("X-Lab-Team", "") or "")[:24] or "shared"
-        self._req_id = hashlib.md5(f"{time.time()}{self.path}{self._ip}".encode()).hexdigest()[:12]
+        if ip.startswith("::ffff:"):
+            ip = ip[7:]
+        # X-Forwarded-For lo escribe el cliente: se recorta para que un valor
+        # enorme no se guarde en el registro ni en el limite de peticiones.
+        return ip[:MAX_LARGO_IP]
+
+    def _dispatch(self, head_only=False):
+        started = time.time()
+        self._identificar()
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         query = parse_qs(parsed.query)
@@ -1411,8 +1576,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not permitidos:
                     raise ApiError(404, "ruta_no_encontrada",
                                    f"La ruta '{path}' no existe en esta API")
-                allow = ", ".join(sorted(set(permitidos) | {"OPTIONS", "HEAD"}))
-                return self._send(204, None, {"Allow": allow}, head_only=head_only)
+                return self._send(204, None, {"Allow": cabecera_allow(permitidos)},
+                                  head_only=head_only)
 
             if not path.startswith("/api/"):
                 raise ApiError(404, "ruta_no_encontrada",
@@ -1430,11 +1595,10 @@ class Handler(BaseHTTPRequestHandler):
                         break
             if fn is None:
                 if permitidos:
-                    allow = ", ".join(sorted(set(permitidos) | {"OPTIONS", "HEAD"}))
                     raise ApiError(405, "metodo_no_permitido",
                                    f"{self.command} no esta permitido en '{path}'",
                                    {"metodos_permitidos": sorted(set(permitidos))},
-                                   {"Allow": allow})
+                                   {"Allow": cabecera_allow(permitidos)})
                 raise ApiError(404, "ruta_no_encontrada",
                                f"La ruta '{path}' no existe en esta API",
                                {"sugerencia": "consulte GET /api/v1 para ver los recursos"})
@@ -1445,13 +1609,18 @@ class Handler(BaseHTTPRequestHandler):
             # 5) autenticacion y autorizacion
             role = self._authorize(path)
 
-            # 6) ejecucion
-            world = get_world(self._team)
+            # 6) ejecucion; el mundo del equipo se crea solo si el manejador lo
+            # usa, y se conserva solo si la peticion tiene exito
             ctx = Ctx(self, "GET" if head_only else self.command, path, query,
-                      body, world, self._team, role, self._ip)
-            # Los segmentos capturados pueden venir codificados (%2F) desde el
-            # navegador; se normalizan antes de entregarlos al manejador.
-            result = fn(ctx, *[unquote(g) for g in match.groups()])
+                      body, self._team, role, self._ip)
+            exito = False
+            try:
+                # Los segmentos capturados pueden venir codificados (%2F) desde
+                # el navegador; se normalizan antes de entregarlos al manejador.
+                result = fn(ctx, *[unquote(g) for g in match.groups()])
+                exito = result[0] < 400
+            finally:
+                ctx.terminar(exito)
 
             # 7) forma de la respuesta
             extra = {}
@@ -1474,17 +1643,15 @@ class Handler(BaseHTTPRequestHandler):
                 extra.setdefault("Cache-Control", "no-cache")
                 inm = self.headers.get("If-None-Match")
                 if inm and tag in [t.strip() for t in inm.split(",")]:
-                    self._send(304, None, {"ETag": tag}, head_only=True)
+                    # El 304 repite los validadores y la politica de cache del 200.
+                    validadores = {k: extra[k] for k in ("ETag", "Cache-Control")}
+                    self._send(304, None, validadores, head_only=True)
                     return self._record(304, started)
             self._send(status, payload, extra, ctype, head_only=head_only)
             return self._record(status, started)
 
         except ApiError as e:
-            payload = {"error": {"codigo": e.code, "mensaje": e.message,
-                                 "estado_http": e.status}}
-            if e.detail:
-                payload["error"]["detalle"] = e.detail
-            self._send(e.status, payload, e.headers, head_only=head_only)
+            self._send_api_error(e, head_only)
             return self._record(e.status, started)
         except Exception as e:  # noqa: BLE001
             payload = {"error": {"codigo": "error_interno", "estado_http": 500,
@@ -1509,6 +1676,7 @@ class Handler(BaseHTTPRequestHandler):
         if length > 1_000_000:
             raise ApiError(413, "cuerpo_muy_grande", "El cuerpo excede 1 MB")
         raw = self.rfile.read(length)
+        self._cuerpo_leido = True
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         # El endpoint de eco acepta cualquier tipo: su proposito es mostrar
         # exactamente lo que llego, incluso si no es JSON.
@@ -1543,11 +1711,14 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(401, "autenticacion_requerida",
                            "Esta operacion modifica la red y requiere la cabecera X-API-Key",
                            {"como": 'agregue -H "X-API-Key: <clave de escritura del laboratorio>"'},
-                           {"WWW-Authenticate": 'ApiKey realm="netlab", header="X-API-Key"'})
+                           WWW_AUTHENTICATE)
         info = API_KEYS.get(key)
         if not info:
-            raise ApiError(403, "credencial_invalida",
-                           "La clave enviada no es valida en este laboratorio")
+            # Una clave que no existe no identifica a nadie: es 401, igual que
+            # no enviarla. El 403 queda para una clave valida que no alcanza.
+            raise ApiError(401, "credencial_invalida",
+                           "La clave enviada no es valida en este laboratorio",
+                           headers=WWW_AUTHENTICATE)
         if info["role"] == "readonly":
             raise ApiError(403, "permiso_insuficiente",
                            "Su clave es de solo lectura y no puede modificar la red",
@@ -1563,11 +1734,15 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             return self._send(500, {"error": {"codigo": "ui_no_disponible",
                                               "mensaje": "No se encontro ui.html"}})
-        self._send(200, html, {"Cache-Control": "no-store"},
+        self._send(200, ui_con_clave(html), {"Cache-Control": "no-store"},
                    "text/html; charset=utf-8", head_only=head_only)
 
     # ---- flujo de eventos en vivo (SSE) ----------------------------------
     def _stream(self):
+        try:
+            world = get_world(self._team)
+        except ApiError as e:
+            return self._send_api_error(e)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -1575,7 +1750,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self._cors()
         self.end_headers()
-        world = get_world(self._team)
         last = world["seq"]
         fin = time.time() + 300
         try:
@@ -1599,9 +1773,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- verbos ----------------------------------------------------------
     def do_GET(self):
         if urlparse(self.path).path.rstrip("/") == "/api/v1/stream":
-            self._ip = self.client_address[0]
-            self._team = re.sub(r"[^A-Za-z0-9_-]", "",
-                                self.headers.get("X-Lab-Team", "") or "")[:24] or "shared"
+            self._identificar()
             return self._stream()
         self._dispatch()
 
@@ -1611,12 +1783,43 @@ class Handler(BaseHTTPRequestHandler):
     do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = lambda self: self._dispatch()
 
 
+class ServidorNetLab(ThreadingHTTPServer):
+    """Un hilo por conexion, con un tope de conexiones simultaneas."""
+    daemon_threads = True
+    # Cola de conexiones por aceptar. Python 3.12, el de la imagen, trae 5: una
+    # rafaga de la clase la desborda y el sistema resetea conexiones antes de
+    # que lleguen al tope. 128 es el valor de las versiones recientes de Python.
+    request_queue_size = 128
+
+    def __init__(self, *args, **kwargs):
+        self._cupos = threading.BoundedSemaphore(MAX_CONEXIONES)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        # Cada conexion retiene un hilo mientras dura; por encima del tope se
+        # cierra sin atenderla, para que nadie agote los hilos del proceso.
+        if not self._cupos.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._cupos.release()  # el hilo no llego a arrancar
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._cupos.release()
+
+
 # Servidor de pila dual: acepta IPv4 e IPv6 en el mismo puerto. Algunos
 # entornos Docker con IPv6 habilitado (por ejemplo OrbStack) reenvian
 # localhost hacia la direccion IPv6 del contenedor; si el proceso escuchara
 # solo en 0.0.0.0 esas conexiones se rechazarian y el navegador mostraria
 # "connection reset".
-class DualStackHTTPServer(ThreadingHTTPServer):
+class DualStackHTTPServer(ServidorNetLab):
     address_family = socket.AF_INET6
 
     def server_bind(self):
@@ -1625,6 +1828,17 @@ class DualStackHTTPServer(ThreadingHTTPServer):
         except (AttributeError, OSError):
             pass
         super().server_bind()
+
+
+def aviso_claves():
+    """Linea del banner que advierte de las claves de fabrica, o vacia."""
+    de_fabrica = [nombre for nombre, valor, fabrica in (
+        ("NETLAB_ADMIN_KEY", ADMIN_KEY, CLAVE_ADMIN_FABRICA),
+        ("NETLAB_READONLY_KEY", READONLY_KEY, CLAVE_LECTURA_FABRICA)) if valor == fabrica]
+    if not de_fabrica:
+        return ""
+    return (f"\n   AVISO: clave de fabrica en {' y '.join(de_fabrica)}. Si expone el"
+            " laboratorio, defina claves propias en esas variables de entorno.\n")
 
 
 def main():
@@ -1636,9 +1850,8 @@ def main():
         pila = "IPv4 e IPv6"
     except OSError:
         # Equipos sin IPv6: se escucha solo en IPv4, como antes.
-        srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+        srv = ServidorNetLab(("0.0.0.0", PORT), Handler)
         pila = "IPv4"
-    srv.daemon_threads = True
     print(f"""
   ============================================================
    NetLab listo ({pila})
@@ -1648,7 +1861,7 @@ def main():
 
    Si publico el puerto con otro numero (-p 9000:{PORT}),
    use ese numero en lugar de {PORT}.
-  ============================================================
+{aviso_claves()}  ============================================================
 """, flush=True)
     try:
         srv.serve_forever()

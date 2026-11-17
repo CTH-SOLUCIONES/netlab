@@ -14,6 +14,13 @@
 # generado desde app/ con kubectl create configmap --from-file (ver desplegar.sh).
 # Asi se edita el codigo como codigo y no como YAML incrustado.
 #
+# Las claves salen del secreto netlab-claves, que desplegar.sh crea si no
+# existe. Si aplica este archivo a mano, creelo antes:
+#   kubectl create namespace netlab
+#   kubectl create secret generic netlab-claves -n netlab \
+#     --from-literal=admin="$(openssl rand -hex 16)" \
+#     --from-literal=lectura="$(openssl rand -hex 16)"
+#
 # Para borrar todo al terminar el curso:  kubectl delete namespace netlab
 # ---------------------------------------------------------------------------
 apiVersion: v1
@@ -75,11 +82,19 @@ spec:
             # sobrevivan tambien a eso, cambie el volumen "datos" por un PVC.
             - name: NETLAB_DB
               value: /data/netlab.db
-            # Si expone el laboratorio a internet, defina claves propias:
-            # - name: NETLAB_ADMIN_KEY
-            #   valueFrom: { secretKeyRef: { name: netlab-claves, key: admin } }
-            # - name: NETLAB_READONLY_KEY
-            #   valueFrom: { secretKeyRef: { name: netlab-claves, key: lectura } }
+            # Claves propias, nunca las de fabrica: el laboratorio queda en
+            # internet. k8s/desplegar.sh crea el secreto netlab-claves con
+            # valores aleatorios la primera vez y los imprime una sola vez.
+            - name: NETLAB_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: netlab-claves
+                  key: admin
+            - name: NETLAB_READONLY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: netlab-claves
+                  key: lectura
           ports:
             - name: http
               containerPort: 8080
