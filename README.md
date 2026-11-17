@@ -11,9 +11,15 @@ efecto de cada comando proyectado en tiempo real.
 **Audiencia:** docentes y estudiantes de redes (nivel CCNA o similar) con manejo
 básico de terminal. No se requiere experiencia en programación.
 
+NetLab es un proyecto de código abierto de
+[CTH Soluciones Tecnológicas](https://cthsoluciones.com).
+
+![Interfaz de NetLab: topología en vivo de los cuatro equipos, explorador HTTP y registro de las peticiones de la clase](docs/img/netlab-interfaz.png)
+
 Todo el laboratorio es **un solo archivo de Python sin dependencias**: no hay
-`pip install`, no hay base de datos, no hay framework. Corre en cualquier
-computador con Python 3.8 o superior, en Windows, macOS o Linux.
+`pip install` ni framework, y el estado se guarda en SQLite, que viene en la
+librería estándar. Corre en cualquier computador con Python 3.8 o superior, en
+Windows, macOS o Linux.
 
 ## Cómo correrlo
 
@@ -52,6 +58,17 @@ El volumen `netlab-datos` guarda el estado (SQLite): recrear el contenedor no
 pierde el trabajo de la clase. Para empezar de cero, borre el volumen
 (`docker volume rm netlab-datos`) o use el botón de reinicio de la interfaz.
 
+**Fije la versión para la clase.** Sin etiqueta, Docker usa `latest`, que sigue
+la rama `main` y cambia con cada publicación. Para que el laboratorio no cambie
+a mitad de curso, indique la versión:
+
+```bash
+docker run -p 8080:8080 -v netlab-datos:/data ghcr.io/cth-soluciones/netlab:1.0.0
+```
+
+La etiqueta `1.0` avanza con las correcciones de la serie 1.0.x; `1.0.0` no se
+mueve.
+
 Si ya clonó el repositorio, `docker compose up` hace lo mismo construyendo la
 imagen localmente. Vea [Construir la imagen](#construir-la-imagen) para los
 detalles del build.
@@ -68,7 +85,7 @@ URL, tiene dos caminos:
 
 - **Un servidor con Docker:** ejecute `docker compose up -d` en cualquier VPS
   y ponga delante su proxy inverso habitual (Caddy, nginx, Traefik) con TLS.
-  No hay más piezas: la aplicación es un único contenedor sin volúmenes.
+  No hay más piezas: la aplicación es un único contenedor con un volumen para el estado.
 - **Kubernetes:** los manifiestos están en `k8s/` y el script
   `k8s/desplegar.sh` los aplica con su dominio:
 
@@ -76,7 +93,7 @@ URL, tiene dos caminos:
   NETLAB_DOMINIO=netlab.mi-academia.edu ./k8s/desplegar.sh
   ```
 
-**Antes de exponerlo, cambie las claves.** Las claves de los ejemplos
+**Antes de exponerlo, cambie las claves.** Las claves de fábrica
 (`netlab-admin-2026` y `netlab-lectura-2026`) son públicas porque están en la
 guía. Defina las suyas con variables de entorno:
 
@@ -84,9 +101,28 @@ guía. Defina las suyas con variables de entorno:
 NETLAB_ADMIN_KEY=mi-clave-secreta NETLAB_READONLY_KEY=mi-clave-lectura python3 app/netlab.py
 ```
 
-Tenga en cuenta que es un laboratorio didáctico, no un servicio productivo: el
-estado vive en memoria (se pierde al reiniciar, lo cual aquí es una ventaja),
-las lecturas GET son abiertas a propósito y no hay registro de auditoría.
+Con Docker Compose, descomente el bloque `environment` de `docker-compose.yml`.
+En Kubernetes no hace falta: la primera vez, `k8s/desplegar.sh` crea el secreto
+`netlab-claves` con claves aleatorias (`openssl rand -hex 16`) y las imprime una
+sola vez, así que anótelas al desplegar.
+
+**Qué hace la interfaz con la clave de administrador:**
+
+- Si la clave es **la de fábrica** (el uso normal en un aula local), el servidor
+  la entrega a la interfaz y todo funciona sin pedir nada. No filtra nada que no
+  sea ya público.
+- Si usted definió **una clave propia**, el servidor no la incluye en la página.
+  La interfaz la pide la primera vez que hace falta (enviar con clave o
+  reiniciar) y la guarda en el `sessionStorage` del navegador, o sea hasta que se
+  cierre la pestaña. En el `curl` de ejemplo de la interfaz aparece `$K` en vez
+  de la clave.
+- Al arrancar, NetLab imprime un aviso si alguna de las dos claves es la de
+  fábrica. Quien lo expone a internet con la clave de fábrica sigue expuesto: el
+  aviso lo dice, pero no lo impide.
+
+Tenga en cuenta que es un laboratorio didáctico, no un servicio productivo: la
+memoria es la fuente de verdad y SQLite solo guarda una copia del estado, las
+lecturas GET son abiertas a propósito y no hay registro de auditoría.
 
 ## Contenido del repositorio
 
@@ -100,6 +136,7 @@ las lecturas GET son abiertas a propósito y no hay registro de auditoría.
 | `Dockerfile`, `docker-compose.yml` | Ejecución en contenedor |
 | `.github/workflows/publicar-imagen.yml` | Publicación automática de la imagen en ghcr.io |
 | `k8s/` | Manifiestos y script para publicarlo en un cluster (opcional) |
+| `tests/` | Pruebas con `unittest` de la librería estándar: `python3 -m unittest discover -s tests`. Las de la interfaz usan Playwright y se omiten si no está instalado |
 
 ### Material de clase en línea
 
@@ -128,6 +165,7 @@ Además de la guía, el material de apoyo está publicado en
    ```bash
    curl -X POST -H "X-API-Key: netlab-admin-2026" http://localhost:8080/api/v1/reset
    ```
+   (con la clave de fábrica; si definió otra, use la suya).
 
 ### Trabajo por equipos
 
@@ -139,6 +177,13 @@ dispositivos:
 curl -H "X-Lab-Team: rojo" http://localhost:8080/api/v1/devices
 python3 cliente/netlab_cli.py --equipo rojo
 ```
+
+Hay un **tope de 50 equipos** por proceso, y `shared` cuenta. Un curso de 30
+estudiantes en equipos cabe de sobra; cada equipo es un mundo completo en memoria
+y el tope evita que cualquiera con acceso a la URL llene el servidor inventando
+nombres. Un equipo nuevo por encima del tope recibe **`403`** con el código
+`limite_de_equipos`, y el mensaje de la respuesta dice cómo liberar uno. Con más
+de 50 equipos hay que reiniciar el laboratorio o usar dos instancias.
 
 En la interfaz visual, el selector **Equipo** de la cabecera cambia lo que se
 muestra; también acepta `?team=rojo` en la URL. El desorden compartido resulta
@@ -162,6 +207,13 @@ core tumba `Gi0/1` en `sw-access-01`, lo que hace visible el impacto de un cambi
 Hay endpoints didácticos bajo `/api/v1/demo/` (`echo`, `status/{código}`,
 `slow`, `rate-limit`, `redirect`) para provocar cualquier comportamiento a
 voluntad.
+
+**Por qué los mensajes de la API no llevan tildes.** La guía y la interfaz sí las
+llevan, pero las respuestas de la API (`mensaje`, `detalle`) están en español sin
+tildes, a propósito: la API responde en UTF-8, y el CMD de Windows con su página
+de códigos por defecto muestra rotas las tildes que curl imprime. Como la guía
+usa CMD para Windows, un mensaje ilegible en medio de una clase cuesta más que una
+tilde. Los ejemplos de respuesta de la guía se copian tal como responde la API.
 
 ## Arquitectura y decisiones
 
@@ -215,7 +267,9 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 [`.github/workflows/publicar-imagen.yml`](.github/workflows/publicar-imagen.yml)
 reconstruye y publica `ghcr.io/cth-soluciones/netlab` (etiquetas `latest` y
 `sha-<commit>`) cada vez que cambia algo en `app/` o en el `Dockerfile` en la
-rama `main`. Si hace un fork, solo debe cambiar el nombre de la imagen en ese
+rama `main`. Al empujar una etiqueta `v*` (por ejemplo `v1.0.0`) publica además
+las etiquetas de versión `1.0.0` y `1.0`. Antes de publicar corre las pruebas y,
+si fallan, no publica nada. Si hace un fork, solo debe cambiar el nombre de la imagen en ese
 archivo: el `GITHUB_TOKEN` del propio workflow tiene permiso de publicar en el
 ghcr.io de su cuenta.
 
@@ -235,3 +289,8 @@ también el registro DNS que haya creado.
 ## Licencia
 
 [MIT](LICENSE). Úselo, modifíquelo y adáptelo a su curso libremente.
+
+## Marcas
+
+Cisco, Catalyst, ISR e IOS XE son marcas de Cisco Systems, Inc. NetLab no está
+afiliado a Cisco ni respaldado por ella.
